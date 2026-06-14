@@ -9,7 +9,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ── Config ──────────────────────────────────────────────────────────────────
-BOT_TOKEN   = "8862464769:AAFPoALhrKJpKFb2_Li2LM3MEmSwl6wkr1E"
+BOT_TOKEN   = "8461040224:AAFgd-njpXXTpzuVHD39_sKr1yVRC6sv13c"
 TARGET_URL  = "https://auziatv.com/ruselt.php"
 COOKIE_FILE = "cookies.json"
 LOG_FILE    = "bot.log"
