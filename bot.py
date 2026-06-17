@@ -67,6 +67,8 @@ def save_cookies(cookies: dict) -> None:
         json.dump(cookies, f, indent=2)
 
 # ── Core request ──────────────────────────────────────────────────────────────
+_main_loop = None  # captured once the bot's event loop is running
+
 def send_request(app=None, chat_id=None) -> None:
     cookies = load_cookies()
     headers = {
@@ -102,9 +104,12 @@ def send_request(app=None, chat_id=None) -> None:
 def _notify(app, chat_id, text: str) -> None:
     try:
         import asyncio
+        if _main_loop is None:
+            log.warning("Notify skipped: event loop not yet captured")
+            return
         asyncio.run_coroutine_threadsafe(
             app.bot.send_message(chat_id=chat_id, text=text),
-            app.loop
+            _main_loop
         )
     except Exception as ex:
         log.warning("Notify failed: %s", ex)
@@ -230,6 +235,13 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Subscribed chat: {chat_id or 'None'}"
     )
 
+# ── Post-init hook (captures the running event loop) ─────────────────────────
+async def _on_startup(app: Application) -> None:
+    global _main_loop
+    import asyncio
+    _main_loop = asyncio.get_running_loop()
+    log.info("Event loop captured for notifications.")
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     global _app_ref
@@ -242,7 +254,7 @@ def main():
     # Background 24h worker thread
     threading.Thread(target=worker, daemon=True).start()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(_on_startup).build()
     _app_ref = app
 
     app.add_handler(CommandHandler("start",       cmd_start))
