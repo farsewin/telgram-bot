@@ -17,6 +17,11 @@ COOKIE_FILE = "cookies.json"
 DB_FILE     = "bot.db"
 LOG_FILE    = "bot.log"
 
+# Render automatically injects this env var with your service's public URL
+# e.g. "https://telegram-bot-x4ns.onrender.com"
+SELF_URL       = os.environ.get("RENDER_EXTERNAL_URL", "")
+PING_INTERVAL  = int(os.environ.get("PING_INTERVAL_SECONDS", "600"))  # 10 min default
+
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -42,17 +47,21 @@ def init_db():
 
 def set_state(key, value):
     conn = sqlite3.connect(DB_FILE)
-    conn.execute("INSERT OR REPLACE INTO state(key,value) VALUES(?,?)", (key, str(value)))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("INSERT OR REPLACE INTO state(key,value) VALUES(?,?)", (key, str(value)))
+        conn.commit()
+    finally:
+        conn.close()
 
 def get_state(key):
     conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT value FROM state WHERE key=?", (key,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
+    try:
+        c = conn.cursor()
+        c.execute("SELECT value FROM state WHERE key=?", (key,))
+        row = c.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
 
 # ── Cookie helpers ────────────────────────────────────────────────────────────
 def load_cookies() -> dict:
@@ -139,6 +148,39 @@ def worker():
             log.error("Worker error: %s", e)
 
         time.sleep(60)
+
+# ── Self-ping worker (prevents Render free-tier spin-down) ───────────────────
+def self_ping_worker():
+    """
+    Render's free tier spins down a service after 15 minutes with no inbound
+    HTTP traffic. This thread periodically requests the service's own public
+    health endpoint so Render always sees recent inbound traffic.
+
+    Notes:
+    - Only runs if RENDER_EXTERNAL_URL is set (i.e. actually running on Render).
+    - Render officially discourages self-pinging as a substitute for paid
+      "always on" instances — this is a workaround, not an endorsed pattern.
+    - This does NOT protect bot.db / cookies.json from being wiped if Render
+      restarts the service for its own reasons (redeploy, host maintenance,
+      etc.) — that requires either a persistent disk (paid) or moving state
+      to an external store.
+    - Keeping the service alive 24/7 will consume your monthly free
+      instance-hours faster (effectively ~720+ hours/month for this service).
+    """
+    if not SELF_URL:
+        log.info("Self-ping disabled: RENDER_EXTERNAL_URL not set (not running on Render?)")
+        return
+
+    ping_url = SELF_URL.rstrip("/") + "/"
+    log.info("Self-ping enabled: pinging %s every %ds", ping_url, PING_INTERVAL)
+
+    while True:
+        time.sleep(PING_INTERVAL)
+        try:
+            resp = requests.get(ping_url, timeout=10)
+            log.info("Self-ping OK (%d)", resp.status_code)
+        except Exception as e:
+            log.warning("Self-ping failed: %s", e)
 
 # ── Health server (keeps Render alive) ───────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
@@ -229,10 +271,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status = "🟢 Running" if enabled == "1" else "🔴 Stopped"
     last   = last_run if last_run else "Never"
+    ping_status = f"every {PING_INTERVAL}s" if SELF_URL else "disabled"
     await update.message.reply_text(
         f"Status: {status}\n"
         f"Last run: {last}\n"
-        f"Subscribed chat: {chat_id or 'None'}"
+        f"Subscribed chat: {chat_id or 'None'}\n"
+        f"Self-ping: {ping_status}"
     )
 
 # ── Post-init hook (captures the running event loop) ─────────────────────────
@@ -246,6 +290,9 @@ async def _on_startup(app: Application) -> None:
 def main():
     global _app_ref
 
+    if BOT_TOKEN == "YOUR_TOKEN_HERE":
+        raise SystemExit("BOT_TOKEN environment variable is not set.")
+
     init_db()
 
     # Health server thread
@@ -253,6 +300,9 @@ def main():
 
     # Background 24h worker thread
     threading.Thread(target=worker, daemon=True).start()
+
+    # Self-ping thread (prevents free-tier spin-down)
+    threading.Thread(target=self_ping_worker, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).post_init(_on_startup).build()
     _app_ref = app
